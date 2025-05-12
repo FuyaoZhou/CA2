@@ -28,8 +28,8 @@ typedef struct _proc_inst_t
     uint64_t fetch_cycle;
     uint64_t dispatch_cycle;
     uint64_t sched_cycle;
-    uint64_t exec_cycle;
     uint64_t retire_cycle;
+    bool safe_to_delete;      // New flag to mark when instruction is safe to delete
 } proc_inst_t;
 // --- Tomasulo Global Structures and Variables ---
 #include <queue>
@@ -50,8 +50,6 @@ extern uint64_t CYCLE;
 // Instruction tag counter
 extern uint64_t NEXT_TAG;
 
-// Register Alias Table (maps architectural reg -> instruction pointer)
-extern std::unordered_map<int32_t, proc_inst_t*> RAT;
 
 // ROB: Reorder Buffer (circular buffer)
 extern std::deque<proc_inst_t*> ROB;
@@ -61,6 +59,9 @@ extern std::deque<proc_inst_t*> DISPATCH_Q;
 
 // Scheduling queue (Reservation Stations)
 extern std::deque<proc_inst_t*> SCHED_Q;
+
+// FETCH buffer for fetched but not yet dispatched instructions
+extern std::deque<proc_inst_t*> FETCH_BUF;
 
 // Result tags (instructions that have completed execution this cycle)
 extern std::unordered_set<uint64_t> RESULT_TAGS;
@@ -83,7 +84,7 @@ void fetch();
 void dispatch();
 void schedule();
 void execute();
-void retire();
+void update();
 
 typedef struct _proc_stats_t
 {
