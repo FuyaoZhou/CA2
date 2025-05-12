@@ -25,6 +25,7 @@ typedef struct _proc_inst_t
     bool issued;              // Has been issued to FU
     bool executed;            // Has finished execution
     bool retired;             // Has retired
+    bool just_retired;        // New flag for just retired instructions (used for wake-up)
     uint64_t fetch_cycle;
     uint64_t dispatch_cycle;
     uint64_t sched_cycle;

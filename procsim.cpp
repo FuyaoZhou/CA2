@@ -95,6 +95,7 @@ void fetch() {
         inst->executed = false;
         inst->retired = false;
         inst->safe_to_delete = false; // Initialize safe_to_delete to false
+        inst->just_retired = false;
         inst->fetch_cycle = CYCLE;
         inst->dispatch_cycle = 0;
         inst->sched_cycle = 0;
@@ -231,11 +232,125 @@ void update() {
     // No need to complete instructions in update, as execution is immediate in execute()
     // Remove FU freeing logic here; FUs are now freed at retire time.
 
-    // Wake up dependent instructions in SCHED_Q
+    // (Wake up logic moved below, after retire loop)
+
+    // Debug: track tag==5 in SCHED_Q before candidate check
+    if (DEBUG_LEVEL >= 1 && CYCLE < 10) {
+        for (auto& inst : SCHED_Q) {
+            if (inst->tag == 5) {
+                std::cerr << "[DEBUG] Tracking tag 5 in SCHED_Q: "
+                          << "src_ready[0]=" << inst->src_ready[0]
+                          << ", src_tag[0]=" << inst->src_tag[0]
+                          << ", src_ready[1]=" << inst->src_ready[1]
+                          << ", src_tag[1]=" << inst->src_tag[1]
+                          << ", issued=" << inst->issued
+                          << ", executed=" << inst->executed
+                          << ", retired=" << inst->retired << "\n";
+            }
+        }
+        // Print ROB contents for debug
+        std::cerr << "[DEBUG] ROB Contents:\n";
+        for (size_t i = 0; i < ROB.size(); ++i) {
+            proc_inst_t* inst = ROB[i];
+            std::cerr << "  [ROB " << i << "] "
+                      << "Tag=" << inst->tag
+                      << " Addr=0x" << std::hex << inst->instruction_address << std::dec
+                      << " Dest=" << inst->dest_reg
+                      << " Done=" << inst->executed
+                      << " Issued=" << inst->issued
+                      << " Retired=" << inst->retired
+                      << " JustRetired=" << inst->just_retired
+                      << "\n";
+        }
+        // Print SCHED_Q contents for debug
+        std::cerr << "[DEBUG] SCHED_Q Contents:\n";
+        for (size_t i = 0; i < SCHED_Q.size(); ++i) {
+            proc_inst_t* inst = SCHED_Q[i];
+            std::cerr << "  [SCHED_Q " << i << "] "
+                      << "Tag=" << inst->tag
+                      << " Addr=0x" << std::hex << inst->instruction_address << std::dec
+                      << " Src0=" << inst->src_reg[0]
+                      << " Src1=" << inst->src_reg[1]
+                      << " Dest=" << inst->dest_reg
+                      << " Ready[0]=" << inst->src_ready[0]
+                      << " Ready[1]=" << inst->src_ready[1]
+                      << " Issued=" << inst->issued
+                      << " Executed=" << inst->executed
+                      << " Retired=" << inst->retired
+                      << " SafeDelete=" << inst->safe_to_delete
+                      << "\n";
+        }
+    }
+    // Debug: check which instructions are ready but not issued
+    if (DEBUG_LEVEL >= 1 && CYCLE < 10) {
+        for (auto& inst : SCHED_Q) {
+            if (!inst->issued && inst->src_ready[0] && inst->src_ready[1]) {
+                std::cerr << "[DEBUG] Candidate for execution: inst tag=" << inst->tag
+                          << ", src_ready[0]=" << inst->src_ready[0]
+                          << ", src_tag[0]=" << inst->src_tag[0]
+                          << ", src_ready[1]=" << inst->src_ready[1]
+                          << ", src_tag[1]=" << inst->src_tag[1]
+                          << ", issued=" << inst->issued
+                          << ", executed=" << inst->executed << "\n";
+            }
+        }
+    }
+
+    // Retire in-order from ROB
+    int retire_count = 0;
+    while (!ROB.empty() && retire_count < PROC_R) {
+        proc_inst_t* inst = ROB.front();
+        if (!inst->executed || inst->retired) break;
+        // Stricter retirement: ensure all prior instructions in SCHED_Q are retired and safe to delete
+        bool earlier_still_alive = false;
+        for (auto& sched_inst : SCHED_Q) {
+            if (sched_inst->tag < inst->tag && (!sched_inst->retired || !sched_inst->safe_to_delete)) {
+                earlier_still_alive = true;
+                break;
+            }
+        }
+        if (earlier_still_alive) break;
+        if (DEBUG_LEVEL >= 1 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Retiring instruction " << inst->tag << "\n";
+        inst->retired = true;
+        inst->just_retired = true;
+        inst->safe_to_delete = true; // Mark safe to delete immediately after retire
+        inst->retire_cycle = CYCLE;
+        STAGE_TRACKER[inst->tag][4] = CYCLE; // RETIRE
+        INSTR_RETIRE_NUM++;
+        // (RESULT_TAGS.insert(inst->tag);) // REMOVED: tag is now inserted at execute(), not at retire
+        // Free FU here after retiring the instruction
+        int op = inst->op_code;
+        if (op == -1) op = 1;
+        std::vector<uint64_t>* fuvec = get_fu_vec(op);
+        // Only free the first busy FU for this op type
+        for (size_t i = 0; i < fuvec->size(); ++i) {
+            if ((*fuvec)[i] > 0) {
+                (*fuvec)[i] = 0;
+                break;
+            }
+        }
+        ROB.pop_front();
+        // Remove immediate delete here to delay deletion until safe
+        retire_count++;
+    }
+
+    // Wake up dependent instructions in SCHED_Q (moved from above)
     for (auto& inst : SCHED_Q) {
         for (int j = 0; j < 2; ++j) {
             if (!inst->src_ready[j]) {
                 if (inst->src_tag[j] == 0) continue;
+                // --- INSERTED LOGIC: If tag matches a recently retired instruction (still in SCHED_Q), treat as ready
+                for (auto& rob_inst : ROB) {
+                    if (rob_inst->tag == inst->src_tag[j] && rob_inst->retired) {
+                        inst->src_ready[j] = true;
+                        inst->src_tag[j] = 0;
+                        if (DEBUG_LEVEL >= 1 && CYCLE < 10)
+                            std::cerr << "[WAKEUP] src[" << j << "] of inst " << inst->tag << " woken up by retired inst tag="
+                                      << rob_inst->tag << "\n";
+                        break;
+                    }
+                }
+                // --- END INSERTED LOGIC
                 if (BROADCAST_TAGS.count(inst->src_tag[j])) {
                     inst->src_ready[j] = true;
                     if (DEBUG_LEVEL >= 2 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Woke up src[" << j << "] of inst " << inst->tag
@@ -272,62 +387,31 @@ void update() {
         }
     }
 
-    // Debug: track tag==5 in SCHED_Q before candidate check
-    if (DEBUG_LEVEL >= 1 && CYCLE < 10) {
-        for (auto& inst : SCHED_Q) {
-            if (inst->tag == 5) {
-                std::cerr << "[DEBUG] Tracking tag 5 in SCHED_Q: "
-                          << "src_ready[0]=" << inst->src_ready[0]
-                          << ", src_tag[0]=" << inst->src_tag[0]
-                          << ", src_ready[1]=" << inst->src_ready[1]
-                          << ", src_tag[1]=" << inst->src_tag[1]
-                          << ", issued=" << inst->issued
-                          << ", executed=" << inst->executed
-                          << ", retired=" << inst->retired << "\n";
-            }
-        }
-    }
-    // Debug: check which instructions are ready but not issued
-    if (DEBUG_LEVEL >= 1 && CYCLE < 10) {
-        for (auto& inst : SCHED_Q) {
-            if (!inst->issued && inst->src_ready[0] && inst->src_ready[1]) {
-                std::cerr << "[DEBUG] Candidate for execution: inst tag=" << inst->tag
-                          << ", src_ready[0]=" << inst->src_ready[0]
-                          << ", src_tag[0]=" << inst->src_tag[0]
-                          << ", src_ready[1]=" << inst->src_ready[1]
-                          << ", src_tag[1]=" << inst->src_tag[1]
-                          << ", issued=" << inst->issued
-                          << ", executed=" << inst->executed << "\n";
+    // Wake up based on just-retired instructions (delayed by one cycle)
+    static std::unordered_set<uint64_t> PREV_CYCLE_RETIRED_TAGS;
+    std::unordered_set<uint64_t> JUST_RETIRED_TAGS = PREV_CYCLE_RETIRED_TAGS;
+
+    // Wake up based on tags in JUST_RETIRED_TAGS (delayed effect - tags retired in previous cycle)
+    for (auto& inst : SCHED_Q) {
+        for (int j = 0; j < 2; ++j) {
+            if (!inst->src_ready[j] && JUST_RETIRED_TAGS.count(inst->src_tag[j])) {
+                inst->src_ready[j] = true;
+                // Save for debug before clearing
+                uint64_t old_tag = inst->src_tag[j];
+                inst->src_tag[j] = 0;
+                if (DEBUG_LEVEL >= 1 && CYCLE < 10)
+                    std::cerr << "[WAKEUP][JUST_RETIRED_DELAYED] src[" << j << "] of inst " << inst->tag
+                              << " woken by delayed just-retired tag=" << old_tag << "\n";
             }
         }
     }
 
-    // Retire in-order from ROB
-    int retire_count = 0;
-    while (!ROB.empty() && retire_count < PROC_R) {
-        proc_inst_t* inst = ROB.front();
-        if (!inst->executed || inst->retired) break;
-        if (DEBUG_LEVEL >= 1 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Retiring instruction " << inst->tag << "\n";
-        inst->retired = true;
-        inst->safe_to_delete = true; // Mark safe to delete immediately after retire
-        inst->retire_cycle = CYCLE;
-        STAGE_TRACKER[inst->tag][4] = CYCLE; // RETIRE
-        INSTR_RETIRE_NUM++;
-        // (RESULT_TAGS.insert(inst->tag);) // REMOVED: tag is now inserted at execute(), not at retire
-        // Free FU here after retiring the instruction
-        int op = inst->op_code;
-        if (op == -1) op = 1;
-        std::vector<uint64_t>* fuvec = get_fu_vec(op);
-        // Only free the first busy FU for this op type
-        for (size_t i = 0; i < fuvec->size(); ++i) {
-            if ((*fuvec)[i] > 0) {
-                (*fuvec)[i] = 0;
-                break;
-            }
+    // After retirement loop, update PREV_CYCLE_RETIRED_TAGS with tags of just-retired instructions (for next cycle)
+    PREV_CYCLE_RETIRED_TAGS.clear();
+    for (auto& inst : SCHED_Q) {
+        if (inst->just_retired) {
+            PREV_CYCLE_RETIRED_TAGS.insert(inst->tag);
         }
-        ROB.pop_front();
-        // Remove immediate delete here to delay deletion until safe
-        retire_count++;
     }
 
     // After retiring from ROB, check all instructions (ROB and SCHED_Q) for safe deletion
@@ -345,30 +429,23 @@ void update() {
         return true;
     };
 
-    // Check ROB instructions for safe deletion
-    for (auto it = ROB.begin(); it != ROB.end(); ) {
-        proc_inst_t* inst = *it;
-        if (safe_to_delete_check(inst)) {
-            inst->safe_to_delete = true;
-            delete inst;
-            it = ROB.erase(it);
-        } else {
-            ++it;
-        }
-    }
 
     // Check SCHED_Q instructions for safe deletion
     for (auto it = SCHED_Q.begin(); it != SCHED_Q.end(); ) {
         proc_inst_t* inst = *it;
         if (safe_to_delete_check(inst)) {
             inst->safe_to_delete = true;
-            delete inst;
-            it = SCHED_Q.erase(it);
+            // Do not delete or erase here; deletion deferred to run_proc()
+            ++it;
         } else {
             ++it;
         }
     }
-    // (No longer clear RESULT_TAGS here; handled in run_proc for delayed broadcast)
+
+    // At the end of update, reset just_retired flags
+    for (auto& inst : SCHED_Q) {
+        inst->just_retired = false;
+    }
 }
 
 
@@ -420,10 +497,15 @@ void run_proc(proc_stats_t* p_stats)
 
         // Perform actual deletion from SCHED_Q for instructions marked in previous cycle
         for (auto* inst : SCHED_Q_DELETE_BUFFER[0]) {
-            auto it = std::find(SCHED_Q.begin(), SCHED_Q.end(), inst);
-            if (it != SCHED_Q.end()) {
-                delete *it;
-                SCHED_Q.erase(it);
+            auto sched_it = std::find(SCHED_Q.begin(), SCHED_Q.end(), inst);
+            if (sched_it != SCHED_Q.end()) {
+                SCHED_Q.erase(sched_it);
+                // 在 SCHED_Q 删除后再从 ROB 删除
+                auto rob_it = std::find(ROB.begin(), ROB.end(), inst);
+                if (rob_it != ROB.end()) {
+                    delete *rob_it;
+                    ROB.erase(rob_it);
+                }
             }
         }
         SCHED_Q_DELETE_BUFFER[0].clear();
