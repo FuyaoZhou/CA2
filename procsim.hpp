@@ -1,3 +1,4 @@
+#include <deque>
 #ifndef PROCSIM_HPP
 #define PROCSIM_HPP
 
@@ -105,3 +106,5 @@ void run_proc(proc_stats_t* p_stats);
 void complete_proc(proc_stats_t *p_stats);
 
 #endif /* PROCSIM_HPP */
+
+extern std::deque<uint64_t> RETIRE_BUFFER;

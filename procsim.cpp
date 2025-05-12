@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <deque>
+std::deque<uint64_t> RETIRE_BUFFER;
 #include <iostream>
 #include "procsim.hpp"
 #include <deque>
@@ -198,6 +201,7 @@ void schedule() {
 
 void execute() {
     // New FU scheduling: ordered by FU class (k0, k1, k2), FIFO within each class.
+    static std::vector<uint64_t> this_cycle_tags;
     auto try_execute_class = [&](int fu_class, std::vector<uint64_t>& fu_vector) {
         for (auto& inst : SCHED_Q) {
             if (inst->issued) continue;
@@ -211,6 +215,8 @@ void execute() {
                     fu_vector[i] = 1;
                     inst->issued = true;
                     inst->executed = true;
+                    // Updated logic: collect tags for this cycle
+                    this_cycle_tags.push_back(inst->tag);
                     BROADCAST_TAGS.insert(inst->tag);
                     STAGE_TRACKER[inst->tag][3] = CYCLE;
                     if (DEBUG_LEVEL >= 1 && CYCLE < 10)
@@ -226,6 +232,13 @@ void execute() {
     try_execute_class(0, FU_K0);
     try_execute_class(1, FU_K1);
     try_execute_class(2, FU_K2);
+
+    // After FU execution, append sorted tags from this cycle to RETIRE_BUFFER
+    if (!this_cycle_tags.empty()) {
+        std::sort(this_cycle_tags.begin(), this_cycle_tags.end());
+        RETIRE_BUFFER.insert(RETIRE_BUFFER.end(), this_cycle_tags.begin(), this_cycle_tags.end());
+        this_cycle_tags.clear();
+    }
 }
 
 void update() {
@@ -262,6 +275,11 @@ void update() {
                       << " JustRetired=" << inst->just_retired
                       << "\n";
         }
+        // Print RETIRE_BUFFER contents for debug
+        std::cerr << "[DEBUG] RETIRE_BUFFER Contents:\n";
+        for (size_t i = 0; i < RETIRE_BUFFER.size(); ++i) {
+            std::cerr << "  [RB " << i << "] Tag=" << RETIRE_BUFFER[i] << "\n";
+        }
         // Print SCHED_Q contents for debug
         std::cerr << "[DEBUG] SCHED_Q Contents:\n";
         for (size_t i = 0; i < SCHED_Q.size(); ++i) {
@@ -296,61 +314,49 @@ void update() {
         }
     }
 
-    // Retire in-order from ROB
+    // Retire in-order using RETIRE_BUFFER
     int retire_count = 0;
-    while (!ROB.empty() && retire_count < PROC_R) {
-        proc_inst_t* inst = ROB.front();
-        if (!inst->executed || inst->retired) break;
-        // Stricter retirement: ensure all prior instructions in SCHED_Q are retired and safe to delete
-        bool earlier_still_alive = false;
-        for (auto& sched_inst : SCHED_Q) {
-            if (sched_inst->tag < inst->tag && (!sched_inst->retired || !sched_inst->safe_to_delete)) {
-                earlier_still_alive = true;
-                break;
-            }
+    auto rb_it = RETIRE_BUFFER.begin();
+    while (rb_it != RETIRE_BUFFER.end() && retire_count < PROC_R) {
+        uint64_t tag_to_retire = *rb_it;
+        // Find the instruction in ROB
+        auto rob_it = std::find_if(ROB.begin(), ROB.end(), [&](proc_inst_t* inst) {
+            return inst->tag == tag_to_retire;
+        });
+        if (rob_it == ROB.end()) {
+            ++rb_it;
+            continue;
         }
-        if (earlier_still_alive) break;
-        if (DEBUG_LEVEL >= 1 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Retiring instruction " << inst->tag << "\n";
+        proc_inst_t* inst = *rob_it;
+        if (!inst->executed || inst->retired) break;
+        if (DEBUG_LEVEL >= 1 && CYCLE < 10)
+            std::cerr << "[CYCLE " << CYCLE << "] Retiring instruction " << inst->tag << "\n";
         inst->retired = true;
         inst->just_retired = true;
-        inst->safe_to_delete = true; // Mark safe to delete immediately after retire
+        inst->safe_to_delete = true;
         inst->retire_cycle = CYCLE;
-        STAGE_TRACKER[inst->tag][4] = CYCLE; // RETIRE
+        STAGE_TRACKER[inst->tag][4] = CYCLE;
         INSTR_RETIRE_NUM++;
-        // (RESULT_TAGS.insert(inst->tag);) // REMOVED: tag is now inserted at execute(), not at retire
-        // Free FU here after retiring the instruction
+        // Free FU
         int op = inst->op_code;
         if (op == -1) op = 1;
         std::vector<uint64_t>* fuvec = get_fu_vec(op);
-        // Only free the first busy FU for this op type
         for (size_t i = 0; i < fuvec->size(); ++i) {
             if ((*fuvec)[i] > 0) {
                 (*fuvec)[i] = 0;
                 break;
             }
         }
-        ROB.pop_front();
-        // Remove immediate delete here to delay deletion until safe
+        RETIRE_BUFFER.erase(rb_it);
         retire_count++;
+        rb_it = RETIRE_BUFFER.begin();
     }
 
-    // Wake up dependent instructions in SCHED_Q (moved from above)
+    // Wake up dependent instructions in SCHED_Q (NO in-cycle wakeup from retired instructions)
     for (auto& inst : SCHED_Q) {
         for (int j = 0; j < 2; ++j) {
             if (!inst->src_ready[j]) {
                 if (inst->src_tag[j] == 0) continue;
-                // --- INSERTED LOGIC: If tag matches a recently retired instruction (still in SCHED_Q), treat as ready
-                for (auto& rob_inst : ROB) {
-                    if (rob_inst->tag == inst->src_tag[j] && rob_inst->retired) {
-                        inst->src_ready[j] = true;
-                        inst->src_tag[j] = 0;
-                        if (DEBUG_LEVEL >= 1 && CYCLE < 10)
-                            std::cerr << "[WAKEUP] src[" << j << "] of inst " << inst->tag << " woken up by retired inst tag="
-                                      << rob_inst->tag << "\n";
-                        break;
-                    }
-                }
-                // --- END INSERTED LOGIC
                 if (BROADCAST_TAGS.count(inst->src_tag[j])) {
                     inst->src_ready[j] = true;
                     if (DEBUG_LEVEL >= 2 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Woke up src[" << j << "] of inst " << inst->tag
@@ -394,7 +400,7 @@ void update() {
     // Wake up based on tags in JUST_RETIRED_TAGS (delayed effect - tags retired in previous cycle)
     for (auto& inst : SCHED_Q) {
         for (int j = 0; j < 2; ++j) {
-            if (!inst->src_ready[j] && JUST_RETIRED_TAGS.count(inst->src_tag[j])) {
+            if (!inst->src_ready[j] && inst->src_tag[j] != 0 && JUST_RETIRED_TAGS.count(inst->src_tag[j])) {
                 inst->src_ready[j] = true;
                 // Save for debug before clearing
                 uint64_t old_tag = inst->src_tag[j];
