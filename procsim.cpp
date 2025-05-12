@@ -377,6 +377,9 @@ void run_proc(proc_stats_t* p_stats)
     if (CYCLE < 10 && DEBUG_LEVEL >= 1) std::cerr << "[DEBUG] NEXT_TAG = " << NEXT_TAG << "\n";
 
     // Main simulation loop
+    // Static buffers to hold instructions to be deleted from SCHED_Q, double-buffered
+    static std::deque<proc_inst_t*> SCHED_Q_DELETE_BUFFER[2];
+
     while (true) {
         RESULT_TAGS = BROADCAST_TAGS;
         BROADCAST_TAGS.clear();
@@ -389,14 +392,6 @@ void run_proc(proc_stats_t* p_stats)
 
         // Update (retire, wakeup, FU reclaim, broadcast results)
         update();
-
-        // Clean up executed + retired instructions from SCHED_Q
-        SCHED_Q.erase(
-            std::remove_if(SCHED_Q.begin(), SCHED_Q.end(),
-                [](proc_inst_t* inst) {
-                    return inst->executed && inst->retired && inst->safe_to_delete;
-                }),
-            SCHED_Q.end());
 
         // Execute
         execute();
@@ -415,6 +410,24 @@ void run_proc(proc_stats_t* p_stats)
         // Check for simulation end: all queues empty, ROB empty
         bool done = DISPATCH_Q.empty() && SCHED_Q.empty() && ROB.empty() && FETCH_BUF.empty();
         if (done) break;
+
+        // Mark instructions for delayed deletion from SCHED_Q
+        for (auto& inst : SCHED_Q) {
+            if (inst->executed && inst->retired && inst->safe_to_delete) {
+                SCHED_Q_DELETE_BUFFER[1].push_back(inst);
+            }
+        }
+
+        // Perform actual deletion from SCHED_Q for instructions marked in previous cycle
+        for (auto* inst : SCHED_Q_DELETE_BUFFER[0]) {
+            auto it = std::find(SCHED_Q.begin(), SCHED_Q.end(), inst);
+            if (it != SCHED_Q.end()) {
+                delete *it;
+                SCHED_Q.erase(it);
+            }
+        }
+        SCHED_Q_DELETE_BUFFER[0].clear();
+        std::swap(SCHED_Q_DELETE_BUFFER[0], SCHED_Q_DELETE_BUFFER[1]);
 
         // Advance cycle
         CYCLE++;
