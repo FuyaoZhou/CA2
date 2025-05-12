@@ -11,7 +11,7 @@ std::deque<uint64_t> RETIRE_BUFFER;
 #include <fstream>
 #include <iomanip>
 
-#define DEBUG_LEVEL 2  // 0 = no debug, 1 = essential debug, 2 = verbose
+#define DEBUG_LEVEL 0  // 0 = no debug, 1 = essential debug, 2 = verbose
 
 // --- Tomasulo Global Variables ---
 
@@ -178,15 +178,15 @@ void dispatch() {
 }
 
 void schedule() {
-    // Prevent SCHED_Q from growing beyond capacity
-    if (SCHED_Q.size() >= 2 * (PROC_K0 + PROC_K1 + PROC_K2)) {
-        if (DEBUG_LEVEL >= 1 && CYCLE < 10) {
-            std::cerr << "[CYCLE " << CYCLE << "] Skipping scheduling due to full SCHED_Q\n";
-        }
-        return;
-    }
+    uint64_t max_sched_q_size = 2 * (PROC_K0 + PROC_K1 + PROC_K2);
     uint64_t to_schedule = DISPATCH_Q.size();
     for (uint64_t i = 0; i < to_schedule; ++i) {
+        if (SCHED_Q.size() >= max_sched_q_size) {
+            if (DEBUG_LEVEL >= 1 && CYCLE < 10) {
+                std::cerr << "[CYCLE " << CYCLE << "] SCHED_Q full, stopping schedule\n";
+            }
+            break;
+        }
         proc_inst_t* inst = DISPATCH_Q.front();
         DISPATCH_Q.pop_front();
         inst->sched_cycle = CYCLE;
@@ -472,7 +472,7 @@ void run_proc(proc_stats_t* p_stats)
         RESULT_TAGS = BROADCAST_TAGS;
         BROADCAST_TAGS.clear();
 
-        if (DEBUG_LEVEL >= 2 && CYCLE >= 10) break;
+        // if (DEBUG_LEVEL >= 2 && CYCLE >= 10) break;
         if (DEBUG_LEVEL >= 1 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Entering loop: ROB=" << ROB.size()
             << ", DISPATCH_Q=" << DISPATCH_Q.size()
             << ", SCHED_Q=" << SCHED_Q.size()
@@ -525,6 +525,14 @@ void run_proc(proc_stats_t* p_stats)
         // Advance cycle
         CYCLE++;
 
+        // Print lightweight progress info every 1000 cycles, even when DEBUG_LEVEL == 0
+        if (CYCLE % 1000 == 0) {
+            std::cerr << "[INFO] Cycle " << CYCLE << ": ROB=" << ROB.size()
+                      << ", DISP_Q=" << DISPATCH_Q.size()
+                      << ", SCHED_Q=" << SCHED_Q.size()
+                      << ", RETIRED=" << INSTR_RETIRE_NUM << "\n";
+        }
+
         if (CYCLE < 10 && DEBUG_LEVEL >= 1) std::cerr << "[CYCLE " << CYCLE << "] ROB=" << ROB.size()
                   << " DISP_Q=" << DISPATCH_Q.size()
                   << " SCHED_Q=" << SCHED_Q.size()
@@ -540,9 +548,9 @@ void run_proc(proc_stats_t* p_stats)
 void complete_proc(proc_stats_t *p_stats) 
 {
     p_stats->max_disp_size = DISP_QUEUE_MAX;
-    p_stats->avg_disp_size = static_cast<double>(DISP_QUEUE_NUM) / p_stats->cycle_count;
-    p_stats->avg_inst_fired = static_cast<double>(INSTR_RETIRE_NUM) / p_stats->cycle_count;
-    p_stats->avg_inst_retired = static_cast<double>(p_stats->retired_instruction) / p_stats->cycle_count;
+    p_stats->avg_disp_size = static_cast<double>(DISP_QUEUE_NUM) / (p_stats->cycle_count-1);
+    p_stats->avg_inst_fired = static_cast<double>(INSTR_RETIRE_NUM) / (p_stats->cycle_count-1);
+    p_stats->avg_inst_retired = static_cast<double>(p_stats->retired_instruction) / (p_stats->cycle_count-1);
 
     std::ofstream file("result_test.output", std::ios::out | std::ios::trunc);
 
@@ -585,7 +593,7 @@ void complete_proc(proc_stats_t *p_stats)
     file << std::fixed << std::setprecision(6);
     file << "Avg inst fired per cycle: " << p_stats->avg_inst_fired << "\n";
     file << "Avg inst retired per cycle: " << p_stats->avg_inst_retired << "\n";
-    out_stat("Total run time (cycles): ", p_stats->cycle_count);
+    out_stat("Total run time (cycles): ", p_stats->cycle_count-1);
 
     file.close();
 }
