@@ -8,7 +8,7 @@
 #include <fstream>
 #include <iomanip>
 
-#define DEBUG_LEVEL 1  // 0 = no debug, 1 = essential debug, 2 = verbose
+#define DEBUG_LEVEL 2  // 0 = no debug, 1 = essential debug, 2 = verbose
 
 // --- Tomasulo Global Variables ---
 
@@ -120,22 +120,30 @@ void dispatch() {
                 inst->src_tag[j] = 0;
                 continue;
             }
-            bool found = false;
-            for (auto rob_iter = ROB.rbegin(); rob_iter != ROB.rend(); ++rob_iter) {
+            if (DEBUG_LEVEL >= 2 && CYCLE < 10) {
+                std::cerr << "[DEBUG][DISPATCH] Inst tag=" << inst->tag
+                          << " src_reg[" << j << "]=" << inst->src_reg[j]
+                          << ", checking against ROB entries\n";
+            }
+            // New logic: find the last (most recent) matching ROB entry (not retired), if any
+            uint64_t last_tag = 0;
+            bool last_ready = true;
+            for (auto rob_iter = ROB.begin(); rob_iter != ROB.end(); ++rob_iter) {
                 proc_inst_t* rob_inst = *rob_iter;
+                if (DEBUG_LEVEL >= 2 && CYCLE < 10) {
+                    std::cerr << "  [DEBUG][DISPATCH] ROB entry tag=" << rob_inst->tag
+                              << ", dest_reg=" << rob_inst->dest_reg
+                              << ", retired=" << rob_inst->retired << "\n";
+                }
                 if (rob_inst->dest_reg == inst->src_reg[j] && !rob_inst->retired) {
-                    inst->src_ready[j] = rob_inst->executed;
-                    if (!rob_inst->executed) {
-                        inst->src_tag[j] = rob_inst->tag;
-                        found = true;
-                    } else {
-                        inst->src_tag[j] = 0;
-                        found = true;
-                    }
-                    break;
+                    last_tag = rob_inst->tag;
+                    last_ready = rob_inst->executed;
                 }
             }
-            if (!found) {
+            if (last_tag != 0) {
+                inst->src_ready[j] = last_ready;
+                inst->src_tag[j] = last_ready ? 0 : last_tag;
+            } else {
                 inst->src_ready[j] = true;
                 inst->src_tag[j] = 0;
             }
@@ -185,7 +193,8 @@ void execute() {
     // If available, allocate FU (set busy time), set issued = true, mark executed=true immediately, add to RESULT_TAGS, update STAGE_TRACKER[tag][3].
     for (auto& inst : SCHED_Q) {
         if (inst->issued) continue;
-        if (!(inst->src_ready[0] && inst->src_ready[1])) continue;
+        if (!(inst->src_ready[0] && inst->src_ready[1] &&
+              inst->src_tag[0] == 0 && inst->src_tag[1] == 0)) continue;
         int op = inst->op_code;
         if (op == -1) op = 1;
         std::vector<uint64_t>* fuvec = get_fu_vec(op);
@@ -218,8 +227,8 @@ void update() {
                 if (inst->src_tag[j] == 0) continue;
                 if (RESULT_TAGS.count(inst->src_tag[j])) {
                     inst->src_ready[j] = true;
-                    if (DEBUG_LEVEL >= 2 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Woke up src[" << j << "] of inst " << inst->tag
-                              << " from tag " << inst->src_tag[j] << "\n";
+        if (DEBUG_LEVEL >= 2 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Woke up src[" << j << "] of inst " << inst->tag
+                  << " from tag " << inst->src_tag[j] << "\n";
                     inst->src_tag[j] = 0;
                 } else {
                     // Only print error if src_tag is not tracked by any current inst in ROB or SCHED_Q
@@ -281,8 +290,7 @@ void update() {
         inst->retire_cycle = CYCLE;
         STAGE_TRACKER[inst->tag][4] = CYCLE; // RETIRE
         INSTR_RETIRE_NUM++;
-        // Mark the tag as broadcasted this cycle
-        RESULT_TAGS.insert(inst->tag); // Mark the tag as broadcasted this cycle
+        // (RESULT_TAGS.insert(inst->tag);) // REMOVED: tag is now inserted at execute(), not at retire
         // Free FU here after retiring the instruction
         int op = inst->op_code;
         if (op == -1) op = 1;
