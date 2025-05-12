@@ -24,6 +24,8 @@ std::deque<proc_inst_t*> SCHED_Q;
 // FETCH buffer for fetched but not yet dispatched instructions
 std::deque<proc_inst_t*> FETCH_BUF;
 std::unordered_set<uint64_t> RESULT_TAGS;
+// Delayed result broadcast for Tomasulo: tags that will be broadcast next cycle
+std::unordered_set<uint64_t> BROADCAST_TAGS;
 std::unordered_map<uint64_t, std::vector<uint64_t>> STAGE_TRACKER;
 std::vector<uint64_t> FU_K0, FU_K1, FU_K2;
 uint64_t DISP_QUEUE_MAX = 0;
@@ -131,9 +133,9 @@ void dispatch() {
             for (auto rob_iter = ROB.begin(); rob_iter != ROB.end(); ++rob_iter) {
                 proc_inst_t* rob_inst = *rob_iter;
                 if (DEBUG_LEVEL >= 2 && CYCLE < 10) {
-                    std::cerr << "  [DEBUG][DISPATCH] ROB entry tag=" << rob_inst->tag
-                              << ", dest_reg=" << rob_inst->dest_reg
-                              << ", retired=" << rob_inst->retired << "\n";
+                    // std::cerr << "  [DEBUG][DISPATCH] ROB entry tag=" << rob_inst->tag
+                    //           << ", dest_reg=" << rob_inst->dest_reg
+                    //           << ", retired=" << rob_inst->retired << "\n";
                 }
                 if (rob_inst->dest_reg == inst->src_reg[j] && !rob_inst->retired) {
                     last_tag = rob_inst->tag;
@@ -172,7 +174,13 @@ void dispatch() {
 }
 
 void schedule() {
-    // Move all instructions from DISPATCH_Q to SCHED_Q, mark schedule time.
+    // Prevent SCHED_Q from growing beyond capacity
+    if (SCHED_Q.size() >= 2 * (PROC_K0 + PROC_K1 + PROC_K2)) {
+        if (DEBUG_LEVEL >= 1 && CYCLE < 10) {
+            std::cerr << "[CYCLE " << CYCLE << "] Skipping scheduling due to full SCHED_Q\n";
+        }
+        return;
+    }
     uint64_t to_schedule = DISPATCH_Q.size();
     for (uint64_t i = 0; i < to_schedule; ++i) {
         proc_inst_t* inst = DISPATCH_Q.front();
@@ -188,32 +196,35 @@ void schedule() {
 }
 
 void execute() {
-    // For each instruction in SCHED_Q:
-    // If not issued and both src_ready[0] and src_ready[1] are true, check FU availability.
-    // If available, allocate FU (set busy time), set issued = true, mark executed=true immediately, add to RESULT_TAGS, update STAGE_TRACKER[tag][3].
-    for (auto& inst : SCHED_Q) {
-        if (inst->issued) continue;
-        if (!(inst->src_ready[0] && inst->src_ready[1] &&
-              inst->src_tag[0] == 0 && inst->src_tag[1] == 0)) continue;
-        int op = inst->op_code;
-        if (op == -1) op = 1;
-        std::vector<uint64_t>* fuvec = get_fu_vec(op);
-        // FU is available only if busy_until == 0 (i.e., not in use), not just <= CYCLE
-        for (size_t i = 0; i < fuvec->size(); ++i) {
-            if ((*fuvec)[i] == 0) {
-                // Latency is always 1, so busy for this cycle, but do not free until retire
-                (*fuvec)[i] = 1; // Mark as in use (any nonzero value)
-                inst->issued = true;
-                inst->executed = true;
-                RESULT_TAGS.insert(inst->tag);
-                STAGE_TRACKER[inst->tag][3] = CYCLE; // EXEC stage is this cycle
-                if (DEBUG_LEVEL >= 1 && CYCLE < 10)
-                    std::cerr << "[CYCLE " << CYCLE << "] Issued and executed instruction " << inst->tag
-                              << " to FU, completed at cycle " << CYCLE << "\n";
-                break;
+    // New FU scheduling: ordered by FU class (k0, k1, k2), FIFO within each class.
+    auto try_execute_class = [&](int fu_class, std::vector<uint64_t>& fu_vector) {
+        for (auto& inst : SCHED_Q) {
+            if (inst->issued) continue;
+            int op = inst->op_code;
+            if (op == -1) op = 1;
+            if (op != fu_class) continue;
+            if (!(inst->src_ready[0] && inst->src_ready[1] &&
+                  inst->src_tag[0] == 0 && inst->src_tag[1] == 0)) continue;
+            for (size_t i = 0; i < fu_vector.size(); ++i) {
+                if (fu_vector[i] == 0) {
+                    fu_vector[i] = 1;
+                    inst->issued = true;
+                    inst->executed = true;
+                    BROADCAST_TAGS.insert(inst->tag);
+                    STAGE_TRACKER[inst->tag][3] = CYCLE;
+                    if (DEBUG_LEVEL >= 1 && CYCLE < 10)
+                        std::cerr << "[CYCLE " << CYCLE << "] Issued and executed instruction " << inst->tag
+                                  << " to FU, completed at cycle " << CYCLE << "\n";
+                    break;
+                }
             }
         }
-    }
+    };
+
+    // Enforce FU class order: k0, then k1, then k2
+    try_execute_class(0, FU_K0);
+    try_execute_class(1, FU_K1);
+    try_execute_class(2, FU_K2);
 }
 
 void update() {
@@ -225,7 +236,7 @@ void update() {
         for (int j = 0; j < 2; ++j) {
             if (!inst->src_ready[j]) {
                 if (inst->src_tag[j] == 0) continue;
-                if (RESULT_TAGS.count(inst->src_tag[j])) {
+                if (BROADCAST_TAGS.count(inst->src_tag[j])) {
                     inst->src_ready[j] = true;
         if (DEBUG_LEVEL >= 2 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Woke up src[" << j << "] of inst " << inst->tag
                   << " from tag " << inst->src_tag[j] << "\n";
@@ -287,6 +298,7 @@ void update() {
         if (!inst->executed || inst->retired) break;
         if (DEBUG_LEVEL >= 1 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Retiring instruction " << inst->tag << "\n";
         inst->retired = true;
+        inst->safe_to_delete = true; // Mark safe to delete immediately after retire
         inst->retire_cycle = CYCLE;
         STAGE_TRACKER[inst->tag][4] = CYCLE; // RETIRE
         INSTR_RETIRE_NUM++;
@@ -345,8 +357,7 @@ void update() {
             ++it;
         }
     }
-    // Clear RESULT_TAGS for this cycle (moved to end of update)
-    RESULT_TAGS.clear();
+    // (No longer clear RESULT_TAGS here; handled in run_proc for delayed broadcast)
 }
 
 
@@ -356,6 +367,9 @@ void run_proc(proc_stats_t* p_stats)
 
     // Main simulation loop
     while (true) {
+        RESULT_TAGS = BROADCAST_TAGS;
+        BROADCAST_TAGS.clear();
+
         if (DEBUG_LEVEL >= 2 && CYCLE >= 10) break;
         if (DEBUG_LEVEL >= 1 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Entering loop: ROB=" << ROB.size()
             << ", DISPATCH_Q=" << DISPATCH_Q.size()

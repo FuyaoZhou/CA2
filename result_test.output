@@ -10,34 +10,34 @@ INST	FETCH	DISP	SCHED	EXEC	STATE
 2	1	2	3	4	5
 3	1	2	3	4	6
 4	1	2	3	4	6
-5	2	3	4	5	7
-6	2	3	4	5	7
-7	2	3	4	6	8
-8	2	3	4	5	8
-9	3	4	5	7	9
-10	3	4	5	8	9
-11	3	4	5	9	10
-12	3	4	5	6	10
+5	2	3	4	1	1
+6	2	3	4	5	1
+7	2	3	4	5	1
+8	2	3	4	5	1
+9	3	4	5	1	1
+10	3	4	5	1	1
+11	3	4	5	1	1
+12	3	4	5	6	1
 13	4	5	6	7	1
-14	4	5	6	8	1
-15	4	5	6	10	1
-16	4	5	6	9	1
-17	5	6	7	1	1
-18	5	6	7	10	1
-19	5	6	7	1	1
-20	5	6	7	1	1
-21	6	7	8	1	1
-22	6	7	8	1	1
-23	6	7	8	1	1
-24	6	7	8	1	1
-25	7	8	9	1	1
-26	7	8	9	1	1
-27	7	8	9	1	1
-28	7	8	9	1	1
-29	8	9	10	1	1
-30	8	9	10	1	1
-31	8	9	10	1	1
-32	8	9	10	1	1
+14	4	5	6	1	1
+15	4	5	6	1	1
+16	4	5	6	1	1
+17	5	6	1	1	1
+18	5	6	1	1	1
+19	5	6	1	1	1
+20	5	6	1	1	1
+21	6	7	1	1	1
+22	6	7	1	1	1
+23	6	7	1	1	1
+24	6	7	1	1	1
+25	7	8	1	1	1
+26	7	8	1	1	1
+27	7	8	1	1	1
+28	7	8	1	1	1
+29	8	9	1	1	1
+30	8	9	1	1	1
+31	8	9	1	1	1
+32	8	9	1	1	1
 33	9	10	1	1	1
 34	9	10	1	1	1
 35	9	10	1	1	1
@@ -48,9 +48,9 @@ INST	FETCH	DISP	SCHED	EXEC	STATE
 40	10	1	1	1	1
 
 Processor stats:
-Total instructions: 12
-Avg Dispatch queue size: 3.600000
-Maximum Dispatch queue size: 4
-Avg inst fired per cycle: 1.200000
-Avg inst retired per cycle: 1.200000
+Total instructions: 4
+Avg Dispatch queue size: 7.600000
+Maximum Dispatch queue size: 20
+Avg inst fired per cycle: 0.400000
+Avg inst retired per cycle: 0.400000
 Total run time (cycles): 10
