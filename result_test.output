@@ -1,0 +1,16 @@
+Processor Settings
+R: 2
+k0: 3
+k1: 2
+k2: 1
+F: 4
+
+INST	FETCH	DISP	SCHED	EXEC	RETIRE
+
+Processor stats:
+Total instructions: 0
+Avg Dispatch queue size: nan
+Maximum Dispatch queue size: 0
+Avg inst fired per cycle: nan
+Avg inst retired per cycle: nan
+Total run time (cycles): 0
