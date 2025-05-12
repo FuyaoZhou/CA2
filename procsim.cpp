@@ -238,23 +238,34 @@ void update() {
                 if (inst->src_tag[j] == 0) continue;
                 if (BROADCAST_TAGS.count(inst->src_tag[j])) {
                     inst->src_ready[j] = true;
-        if (DEBUG_LEVEL >= 2 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Woke up src[" << j << "] of inst " << inst->tag
-                  << " from tag " << inst->src_tag[j] << "\n";
+                    if (DEBUG_LEVEL >= 2 && CYCLE < 10) std::cerr << "[CYCLE " << CYCLE << "] Woke up src[" << j << "] of inst " << inst->tag
+                              << " from tag " << inst->src_tag[j] << "\n";
                     inst->src_tag[j] = 0;
-                } else {
-                    // Only print error if src_tag is not tracked by any current inst in ROB or SCHED_Q
+                }
+                else {
+                    // Fallback: If tag is not found in ROB or SCHED_Q and in range, consider it implicitly ready
                     bool valid_tag = false;
                     for (auto& rob_inst : ROB) {
-                        if (rob_inst->tag == inst->src_tag[j]) valid_tag = true;
+                        if (rob_inst->tag == inst->src_tag[j]) {
+                            valid_tag = true;
+                            break;
+                        }
                     }
                     for (auto& sched_inst : SCHED_Q) {
-                        if (sched_inst->tag == inst->src_tag[j]) valid_tag = true;
+                        if (sched_inst->tag == inst->src_tag[j]) {
+                            valid_tag = true;
+                            break;
+                        }
                     }
+                    // If the tag is not valid anymore and in range, consider it implicitly ready
                     if (!valid_tag && inst->src_tag[j] > 0 && inst->src_tag[j] < NEXT_TAG) {
+                        inst->src_ready[j] = true;
+                        // Save for debug before clearing
+                        uint64_t old_tag = inst->src_tag[j];
+                        inst->src_tag[j] = 0;
                         if (DEBUG_LEVEL >= 1 && CYCLE < 10)
-                            std::cerr << "[ERROR] Invalid src_tag[" << j << "] = " << inst->src_tag[j]
-                                      << " for inst tag=" << inst->tag
-                                      << " (NEXT_TAG=" << NEXT_TAG << ")\n";
+                            std::cerr << "[INFO] src[" << j << "] of inst " << inst->tag << " assumed ready: tag "
+                                      << old_tag << " not found in ROB or SCHED_Q\n";
                     }
                 }
             }
