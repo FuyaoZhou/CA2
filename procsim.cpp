@@ -314,21 +314,22 @@ void update() {
         }
     }
 
-    // Retire in-order using RETIRE_BUFFER
+    // Retire in-order using RETIRE_BUFFER (new logic)
+    // Take first PROC_R tags from RETIRE_BUFFER
+    std::vector<uint64_t> retire_candidates;
+    for (size_t i = 0; i < RETIRE_BUFFER.size() && i < PROC_R; ++i) {
+        retire_candidates.push_back(RETIRE_BUFFER[i]);
+    }
+    // Sort candidates by tag value
+    std::sort(retire_candidates.begin(), retire_candidates.end());
     int retire_count = 0;
-    auto rb_it = RETIRE_BUFFER.begin();
-    while (rb_it != RETIRE_BUFFER.end() && retire_count < PROC_R) {
-        uint64_t tag_to_retire = *rb_it;
-        // Find the instruction in ROB
+    for (uint64_t tag_to_retire : retire_candidates) {
         auto rob_it = std::find_if(ROB.begin(), ROB.end(), [&](proc_inst_t* inst) {
             return inst->tag == tag_to_retire;
         });
-        if (rob_it == ROB.end()) {
-            ++rb_it;
-            continue;
-        }
+        if (rob_it == ROB.end()) continue;
         proc_inst_t* inst = *rob_it;
-        if (!inst->executed || inst->retired) break;
+        if (!inst->executed || inst->retired) continue;
         if (DEBUG_LEVEL >= 1 && CYCLE < 10)
             std::cerr << "[CYCLE " << CYCLE << "] Retiring instruction " << inst->tag << "\n";
         inst->retired = true;
@@ -347,9 +348,13 @@ void update() {
                 break;
             }
         }
-        RETIRE_BUFFER.erase(rb_it);
+        // Remove this tag from RETIRE_BUFFER
+        auto it = std::find(RETIRE_BUFFER.begin(), RETIRE_BUFFER.end(), tag_to_retire);
+        if (it != RETIRE_BUFFER.end()) {
+            RETIRE_BUFFER.erase(it);
+        }
         retire_count++;
-        rb_it = RETIRE_BUFFER.begin();
+        if (retire_count >= PROC_R) break;
     }
 
     // Wake up dependent instructions in SCHED_Q (NO in-cycle wakeup from retired instructions)
